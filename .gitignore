@@ -4,3 +4,4 @@ trained_model/
 **/*.log
 __pycache__/
 *.log
+ipynb_checkpoints/
