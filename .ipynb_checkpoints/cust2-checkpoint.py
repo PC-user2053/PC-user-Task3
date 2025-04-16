@@ -10,14 +10,9 @@ import itertools
 import time
 from functools import lru_cache
 import sys
-import threading
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-try:
-    import tkinter as tk
-    from tkinter import filedialog
-except ImportError:
-    tk = None
-    filedialog = None
+import threading
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -75,8 +70,6 @@ def call_inference_api(prompt, api_key=GEMINI_API_KEY, api_url=GEMINI_API_URL, m
         except requests.exceptions.HTTPError as e:
             if response.status_code == 429:
                 delay = initial_delay * (2 ** retries)
-                if delay > 8:
-                    delay = 5  # Cap retries exceeding 8s at 5s
                 logger.warning(f"Rate limit exceeded (429). Retrying in {delay} seconds...")
                 time.sleep(delay)
                 retries += 1
@@ -454,67 +447,15 @@ def predict_conflicts(input_file, new_requirement=None, conflict_type_weights=No
 def get_csv_files(directory="/workspaces/PC-user-Task3"):
     return [f for f in os.listdir(directory) if f.endswith('.csv')]
 
-def select_file_with_dialog(directory="/workspaces/PC-user-Task3", title="Select a CSV file"):
-    if tk is None or filedialog is None:
-        logger.warning("tkinter not available, falling back to text-based selection")
-        return None
-    
-    try:
-        root = tk.Tk()
-        root.withdraw()  # Hide the main window
-        file_path = filedialog.askopenfilename(
-            initialdir=directory,
-            title=title,
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        root.destroy()
-        
-        if not file_path:
-            logger.info("File selection cancelled")
-            return None
-        if not file_path.endswith('.csv'):
-            logger.error("Selected file is not a CSV")
-            return None
-        if not os.path.exists(file_path):
-            logger.error(f"Selected file does not exist: {file_path}")
-            return None
-        return file_path
-    except Exception as e:
-        logger.warning(f"Failed to open file dialog: {str(e)}, falling back to text-based selection")
-        return None
-
-def select_file_text_based(directory="/workspaces/PC-user-Task3", prompt="Select a CSV file"):
-    csv_files = get_csv_files(directory)
-    if not csv_files:
-        logger.error("No CSV files found in the directory.")
-        return None
-    
-    print(f"\n{prompt}:")
-    for i, file in enumerate(csv_files, 1):
-        print(f"{i}. {file}")
-    
-    file_choice = input("Select a file by number (or 'back' to return): ").strip()
-    if file_choice.lower() == 'back':
-        return None
-    try:
-        file_idx = int(file_choice) - 1
-        if 0 <= file_idx < len(csv_files):
-            return os.path.join(directory, csv_files[file_idx])
-        else:
-            logger.error("Invalid file number.")
-            return None
-    except ValueError:
-        logger.error("Please enter a valid number.")
-        return None
-
 def display_menu():
     """Display the menu and handle user input for conflict detection operations"""
     conflict_type_weights = None
     last_results_file = None  # Track the latest results file from option 2
-    directory = "/workspaces/PC-user-Task3"
 
     while True:
+        # Display the menu, excluding option 1 (baseline mode)
         print("\n=== Requirements Conflict Detection Menu ===")
+        # print("1. Select a file for prediction (baseline mode)")  # Hidden to prevent user access
         print("2. Select a file for prediction (exhaustive mode, unique pairs)")
         print("3. Enter a new requirement")
         print("4. Load a file for training")
@@ -523,15 +464,29 @@ def display_menu():
         choice = input("Enter your choice (2-5): ").strip()
 
         if choice == "2":
-            exhaustive = True
-            file_path = select_file_with_dialog(directory, "Select CSV for Prediction")
-            if file_path is None:
-                file_path = select_file_text_based(directory, "Available CSV files for prediction (exhaustive mode, unique pairs)")
-            if file_path:
-                output_df, csv_output = predict_conflicts(file_path, conflict_type_weights=conflict_type_weights, exhaustive=exhaustive)
-                last_results_file = csv_output  # Store the results file path
-            else:
+            exhaustive = True  # Exhaustive mode with all C(n,2) unique pairs
+            csv_files = get_csv_files()
+            if not csv_files:
+                logger.error("No CSV files found in the directory.")
                 continue
+            
+            print("\nAvailable CSV files for prediction (exhaustive mode, unique pairs):")
+            for i, file in enumerate(csv_files, 1):
+                print(f"{i}. {file}")
+            
+            file_choice = input("Select a file by number (or 'back' to return): ").strip()
+            if file_choice.lower() == 'back':
+                continue
+            try:
+                file_idx = int(file_choice) - 1
+                if 0 <= file_idx < len(csv_files):
+                    input_file = os.path.join("/workspaces/PC-user-Task3", csv_files[file_idx])
+                    output_df, csv_output = predict_conflicts(input_file, conflict_type_weights=conflict_type_weights, exhaustive=exhaustive)
+                    last_results_file = csv_output  # Store the results file path
+                else:
+                    logger.error("Invalid file number.")
+            except ValueError:
+                logger.error("Please enter a valid number.")
 
         elif choice == "3":
             new_requirement = input("Enter a new requirement to analyze (or 'back' to return): ").strip()
@@ -542,11 +497,13 @@ def display_menu():
                 continue
             
             if last_results_file and os.path.exists(last_results_file):
+                # Use the latest results file from option 2
                 try:
                     results_df = pd.read_csv(last_results_file)
                     if results_df.empty or not {'Requirement_1', 'Requirement_2'}.issubset(results_df.columns):
                         logger.warning("Results file is empty or invalid. Please select a file.")
                     else:
+                        # Extract unique requirements from all pairs
                         conflict_requirements = list(dict.fromkeys(
                             results_df['Requirement_1'].tolist() + results_df['Requirement_2'].tolist()
                         ))
@@ -567,25 +524,54 @@ def display_menu():
                 except Exception as e:
                     logger.error(f"Error reading results file {last_results_file}: {e}")
             
-            file_path = select_file_with_dialog(directory, "Select CSV to Compare New Requirement")
-            if file_path is None:
-                file_path = select_file_text_based(directory, "Select a file to compare the new requirement against")
-            if file_path:
-                predict_conflicts(file_path, new_requirement=new_requirement, conflict_type_weights=conflict_type_weights)
-            else:
+            # Fallback: prompt for a file if no valid results file
+            csv_files = get_csv_files()
+            if not csv_files:
+                logger.error("No CSV files found to compare against.")
                 continue
+            
+            print("\nSelect a file to compare the new requirement against:")
+            for i, file in enumerate(csv_files, 1):
+                print(f"{i}. {file}")
+            
+            file_choice = input("Select a file by number (or 'back' to return): ").strip()
+            if file_choice.lower() == 'back':
+                continue
+            try:
+                file_idx = int(file_choice) - 1
+                if 0 <= file_idx < len(csv_files):
+                    input_file = os.path.join("/workspaces/PC-user-Task3", csv_files[file_idx])
+                    predict_conflicts(input_file, new_requirement=new_requirement, conflict_type_weights=conflict_type_weights)
+                else:
+                    logger.error("Invalid file number.")
+            except ValueError:
+                logger.error("Please enter a valid number.")
 
         elif choice == "4":
-            file_path = select_file_with_dialog(directory, "Select CSV for Training")
-            if file_path is None:
-                file_path = select_file_text_based(directory, "Available CSV files for training")
-            if file_path:
-                iterations = input("Enter number of training iterations (default is 2): ").strip()
-                iterations = int(iterations) if iterations.isdigit() else 2
-                _, conflict_type_weights = api_pseudo_train(file_path, iterations)
-                logger.info("Training completed. Conflict type weights updated.")
-            else:
+            csv_files = get_csv_files()
+            if not csv_files:
+                logger.error("No CSV files found in the directory.")
                 continue
+            
+            print("\nAvailable CSV files for training:")
+            for i, file in enumerate(csv_files, 1):
+                print(f"{i}. {file}")
+            
+            file_choice = input("Select a file by number (or 'back' to return): ").strip()
+            if file_choice.lower() == 'back':
+                continue
+            try:
+                file_idx = int(file_choice) - 1
+                if 0 <= file_idx < len(csv_files):
+                    test_file = os.path.join("/workspaces/PC-user-Task3", csv_files[file_idx])
+                    iterations = input("Enter number of training iterations (default is 2): ").strip()
+                    iterations = int(iterations) if iterations.isdigit() else 2
+                    _, conflict_type_weights = api_pseudo_train(test_file, iterations)
+                    logger.info("Training completed. Conflict type weights updated.")
+                else:
+                    logger.error("Invalid file number.")
+            except ValueError:
+                logger.error("Please enter a valid number.")
 
         elif choice == "5":
             logger.info("Exiting the program.")
